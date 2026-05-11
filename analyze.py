@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
 Analyze 221(g) administrative processing times for CS/AI-related fields
-using data from checkee.info (via xingyaoww/checkee-dashboard).
+using data from checkee.info.
 
-Data source: https://github.com/xingyaoww/checkee-dashboard
+Data sources:
+  - xingyaoww/checkee-dashboard JSONL (bulk historical data)
+  - checkee.info "Last 90 Days' Complete Cases" page (saved as MHTML for fresh data)
 """
 
 import json
 import re
 import csv
+import email
 import sys
 import os
 from collections import defaultdict
+from datetime import datetime
 from urllib.request import urlretrieve
 
 DATA_URL = "https://raw.githubusercontent.com/xingyaoww/checkee-dashboard/main/public/data/checkee_data.jsonl"
@@ -20,7 +24,7 @@ DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "checkee_data.jsonl"
 
 def is_cs_ai(major: str) -> bool:
     m = major.strip().lower()
-    if m in ("cs", "cse", "eecs", "mscs", "cs/ai", "ai", "ml", "cs phd", "ee/cs"):
+    if m in ("cs", "cse", "eecs", "mscs", "cs/ai", "csai", "ai", "ml", "cs phd", "ee/cs"):
         return True
     keywords = [
         "computer science",
@@ -44,6 +48,16 @@ def is_cs_ai(major: str) -> bool:
     if m == "computer":
         return True
     return False
+
+
+def is_cs_phd(major: str) -> bool:
+    m = major.strip().lower()
+    has_phd = "phd" in m or "ph.d" in m or "doctor" in m
+    has_cs = any(k in m for k in [
+        "cs", "computer", "eecs", "cse", "software", "data sci",
+        "machine learn", "artificial intell", "ai",
+    ])
+    return has_phd and has_cs
 
 
 def percentile(data: list[float], p: float) -> float:
@@ -75,14 +89,16 @@ def load_cases():
     return cases
 
 
-def analyze(cases, target_months, visa_filter=None):
+def analyze(cases, target_months, visa_filter=None, major_filter=None):
     monthly_clear = defaultdict(list)
     monthly_reject = defaultdict(list)
     monthly_pending = defaultdict(int)
     monthly_total = defaultdict(int)
 
+    filter_fn = major_filter or is_cs_ai
+
     for rec in cases:
-        if not is_cs_ai(rec.get("major", "")):
+        if not filter_fn(rec.get("major", "")):
             continue
         month = rec.get("month", "")
         if month not in target_months:
@@ -174,16 +190,105 @@ def write_csv(rows, filename, header):
     print(f"\nWritten to {path}")
 
 
+def parse_mhtml(mhtml_path: str) -> list[dict]:
+    """Parse a checkee.info 'Complete Cases' page saved as MHTML."""
+    with open(mhtml_path, "rb") as f:
+        msg = email.message_from_bytes(f.read())
+
+    html_content = None
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            charset = part.get_content_charset() or "utf-8"
+            html_content = payload.decode(charset, errors="replace")
+            break
+
+    if not html_content:
+        return []
+
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html_content, re.DOTALL)
+
+    header_idx = None
+    for i, row in enumerate(rows):
+        if "Visa Type" in row and "Major" in row and "Check Date" in row:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return []
+
+    cases = []
+    for i in range(header_idx + 1, len(rows)):
+        row = rows[i]
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.DOTALL)
+        cell_text = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+
+        case_id_match = re.search(r"casenum=(\d+)", row)
+        case_id = case_id_match.group(1) if case_id_match else None
+
+        if len(cell_text) >= 10 and case_id:
+            check_date = cell_text[7]
+            complete_date = cell_text[8]
+            try:
+                d1 = datetime.strptime(check_date, "%Y-%m-%d")
+                d2 = datetime.strptime(complete_date, "%Y-%m-%d")
+                waiting_days = (d2 - d1).days
+            except ValueError:
+                waiting_days = int(cell_text[9]) if cell_text[9].isdigit() else 0
+
+            cases.append({
+                "case_id": case_id,
+                "id": cell_text[1],
+                "visa_type": cell_text[2],
+                "visa_entry": cell_text[3],
+                "us_consulate": cell_text[4],
+                "major": cell_text[5],
+                "status": cell_text[6],
+                "check_date": check_date,
+                "complete_date": complete_date,
+                "waiting_days": str(waiting_days),
+                "month": check_date[:7] if len(check_date) >= 7 else "",
+                "scraped_at": datetime.now().isoformat(),
+            })
+
+    return cases
+
+
+def merge_mhtml_into_cases(cases: list[dict], mhtml_path: str) -> list[dict]:
+    """Merge MHTML-parsed cases into the main dataset, deduplicating by case_id."""
+    existing = {c["case_id"]: c for c in cases}
+    mhtml_cases = parse_mhtml(mhtml_path)
+
+    new, updated = 0, 0
+    for rec in mhtml_cases:
+        cid = rec["case_id"]
+        if cid in existing:
+            if existing[cid].get("status") == "Pending" and rec["status"] in ("Clear", "Reject"):
+                existing[cid] = rec
+                updated += 1
+        else:
+            existing[cid] = rec
+            new += 1
+
+    print(f"MHTML merge: {new} new cases, {updated} updated (Pending -> resolved)")
+    return list(existing.values())
+
+
 def main():
     download_data()
     cases = load_cases()
-    print(f"Loaded {len(cases)} total cases")
+    print(f"Loaded {len(cases)} cases from JSONL")
+
+    mhtml_path = os.path.join(os.path.dirname(__file__), "data", "Check Reporter.mhtml")
+    if os.path.exists(mhtml_path):
+        cases = merge_mhtml_into_cases(cases, mhtml_path)
+        print(f"Total after merge: {len(cases)} cases")
 
     target_months = []
     for y in range(2025, 2027):
         for m in range(1, 13):
             ms = f"{y}-{m:02d}"
-            if "2025-05" <= ms <= "2026-04":
+            if "2025-05" <= ms <= "2026-05":
                 target_months.append(ms)
 
     csv_header = ["Month", "Total", "Resolved", "Pending", "P25", "P50", "P75", "Mean", "Max", "Rejected", "Rej%"]
@@ -199,6 +304,18 @@ def main():
     rows_h1 = print_table(mc, mr, mp, mt, target_months,
                            "CS/AI FIELD — H1B VISA ONLY")
     write_csv(rows_h1, "cs_ai_h1b_only.csv", csv_header)
+
+    # CS PhD - all visa types
+    mc, mr, mp, mt = analyze(cases, target_months, major_filter=is_cs_phd)
+    rows_phd = print_table(mc, mr, mp, mt, target_months,
+                            "CS PhD — ALL VISA TYPES")
+    write_csv(rows_phd, "cs_phd_all_visas.csv", csv_header)
+
+    # CS PhD - H1B only
+    mc, mr, mp, mt = analyze(cases, target_months, visa_filter="H1", major_filter=is_cs_phd)
+    rows_phd_h1 = print_table(mc, mr, mp, mt, target_months,
+                               "CS PhD — H1B VISA ONLY")
+    write_csv(rows_phd_h1, "cs_phd_h1b_only.csv", csv_header)
 
     # Print rejected cases
     print("\n--- Rejected CS/AI Cases (all visa types, past 12 months) ---")

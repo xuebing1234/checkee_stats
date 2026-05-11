@@ -6,29 +6,29 @@
 Analyze 221(g) administrative processing times for CS/AI-related fields from checkee.info, focusing on H1B visa cases over the past 12 months (May 2025 – April 2026).
 
 ### Approach
-1. **Attempted direct scraping** of checkee.info monthly case pages (`main.php?dispdate=YYYY-MM`). All attempts blocked by Cloudflare protection (403 on curl, WebFetch, cloudscraper, Python urllib).
-2. **Found existing scraped dataset** from [xingyaoww/checkee-dashboard](https://github.com/xingyaoww/checkee-dashboard) — a GitHub project that scrapes checkee.info daily via GitHub Actions and stores all cases as JSONL. Downloaded `checkee_data.jsonl` (46,712 cases, 14 MB, last scraped 2026-03-31).
-3. **Built `analyze.py`** to filter CS/AI-related majors, compute percentile distributions (P25/P50/P75/Mean/Max), and rejection rates on a monthly basis.
+1. **Attempted direct scraping** of checkee.info detail pages (`main.php`). All automated attempts blocked by Cloudflare protection (added ~May 2026). The xingyaoww/checkee-dashboard scraper that previously worked has also been failing since May 6.
+2. **Downloaded bulk historical data** from [xingyaoww/checkee-dashboard](https://github.com/xingyaoww/checkee-dashboard) JSONL (46,712 cases, last scraped 2026-03-31). Data only covered through 2026-01.
+3. **Supplemented with fresh data** by manually saving checkee.info's "Last 90 Days' Complete Cases" page as MHTML. Parsed and merged: +319 new cases, +343 updated (Pending -> resolved). Final dataset: 47,031 cases.
+4. **Built `analyze.py`** with filters for CS/AI (broad) and CS PhD (narrow), per-month percentile distributions, rejection rates, and CSV output.
 
-### Key findings
-- **H1B + CS/AI median processing time: ~55 days** (P25=37, P75=70)
-- **Zero H1B rejections** in the CS/AI category for the entire 12-month window
-- **Overall rejection rate: 1.9%** (4/210 resolved cases, all F1/J1 students)
-- Oct 2025 cohort had longest waits (P50=88 days)
-- Nov 2025 onward data is right-censored (many cases still pending at scrape date)
+### Key findings — CS/AI H1B
+- **Median wait: ~66 days** (P25=38, P75=92)
+- **1 rejection** out of 163 resolved (0.6%) — "Csai" major, Beijing, immediate 1-day turnaround
+- Oct–Nov 2025 had longest waits (P50=89–106 days)
+
+### Key findings — CS PhD (all visa types)
+- **Only 24 resolved cases** — too sparse for reliable stats
+- **Median wait: ~69 days** (P25=48, P75=99), zero rejections
+- H1B CS PhD: only 3 resolved cases (median 92 days)
 
 ### Files
-- `analyze.py` — main analysis script (downloads data if missing, outputs tables + CSVs)
-- `data/checkee_data.jsonl` — raw dataset (46,712 cases)
-- `output/cs_ai_all_visas.csv` — results for all visa types
-- `output/cs_ai_h1b_only.csv` — results for H1B only
-- `README.md` — full writeup with tables
+- `analyze.py` — analysis script with MHTML merge, CS/AI + CS PhD filters
+- `data/checkee_data.jsonl` — merged dataset (47,031 cases)
+- `data/Check Reporter.mhtml` — raw 90-day completed cases page
+- `output/cs_ai_all_visas.csv` / `cs_ai_h1b_only.csv`
+- `output/cs_phd_all_visas.csv` / `cs_phd_h1b_only.csv`
 
 ## To pick up next time
-- **Re-download data** to get fresher scrape (the dashboard updates daily): delete `data/checkee_data.jsonl` and re-run `python3 analyze.py`
-- **Feb–Apr 2026 gaps**: these will fill in once the dashboard scrapes newer data and cases resolve
-- **Possible extensions**: 
-  - Filter by consulate (Beijing vs Guangzhou vs others)
-  - Add EE/ECE to the analysis separately for comparison
-  - Visualizations (histogram of wait times, trend chart)
-  - Track how right-censored months update over time
+- **Refresh data**: save a new "Last 90 Days' Complete Cases" MHTML from checkee.info, replace `data/Check Reporter.mhtml`, re-run `python3 analyze.py`
+- **Monthly pages**: if Cloudflare protection is lifted, download individual monthly pages for more complete data (the MHTML only covers completed cases, not pending ones)
+- **Possible extensions**: filter by consulate, add EE/ECE comparison, visualizations
